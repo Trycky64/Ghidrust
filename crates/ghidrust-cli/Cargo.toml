@@ -9,9 +9,14 @@ description = "Ghidrust CLI and MCP/agent tool surface"
 name = "ghidrust"
 path = "src/main.rs"
 
+[[bin]]
+name = "ghidrust-batch-worker"
+path = "src/bin/batch_worker.rs"
+
 [dependencies]
 ghidrust-core = { workspace = true, features = ["gpu"] }
 ghidrust-decomp = { workspace = true, features = ["gpu"] }
+ghidrust-batch = { workspace = true }
 ghidrust-il2cpp = { workspace = true }
 ghidrust-unity-inventory = { workspace = true }
 ghidrust-types = { workspace = true }

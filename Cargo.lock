@@ -782,6 +782,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1389,10 +1398,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghidrust-batch"
+version = "0.1.2"
+dependencies = [
+ "crossbeam-channel",
+ "ghidrust-core",
+ "ghidrust-decomp",
+ "ghidrust-structure",
+ "ghidrust-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "ghidrust-cli"
 version = "0.1.2"
 dependencies = [
  "ghidrust-agent",
+ "ghidrust-batch",
  "ghidrust-core",
  "ghidrust-decomp",
  "ghidrust-il2cpp",

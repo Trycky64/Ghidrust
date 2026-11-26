@@ -9,15 +9,16 @@ mod friction;
 mod mcp_decode;
 mod net_cmds;
 
+use ghidrust_batch::{BatchConfig, BatchEngine, OutputFormat};
 use ghidrust_core::{
     analyze_path, analyzer_catalog, artifact_get, artifact_query, assess_decompile_bounds,
     calls_callees, collect_callsite_hints, collect_strings_bytes, collect_strings_opts,
     create_function, disassemble_range_opts, filter_imports, inventory_pe_dir, list_artifacts,
     list_tree, live_process_info_json, load_path, load_path_opts, process_attach_opts,
-    process_break_clear, process_break_list, process_break_set,
-    process_continue, process_detach, process_export_snapshot, process_launch, process_list,
-    process_modules, process_pause, process_read, process_regions, process_resolve, process_resume,
-    process_scan_mem, process_stack, process_step_into, process_step_out, process_step_over,
+    process_break_clear, process_break_list, process_break_set, process_continue, process_detach,
+    process_export_snapshot, process_launch, process_list, process_modules, process_pause,
+    process_read, process_regions, process_resolve, process_resume, process_scan_mem,
+    process_stack, process_step_into, process_step_out, process_step_over,
     process_thread_context_get, process_thread_context_set, process_threads, process_vtable_probe,
     process_wait, process_watch_expr, recover_rtti, resolve_function, rtti_query, run_analyzers,
     scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel,
@@ -208,6 +209,14 @@ fn main() -> ExitCode {
     args.retain(|a| a != "-json");
 
     match args[0].as_str() {
+        "__batch-worker" => match ghidrust_batch::worker::run_stdio_worker() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("batch worker error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "batch-decompile" => cmd_batch_decompile(&args[1..], json_mode),
         "help" | "-h" | "-help" => {
             print_help();
             ExitCode::SUCCESS
@@ -290,6 +299,8 @@ fn print_help() {
  "ghidrust — AI-native reverse-engineering (CodeBrowser headless)\n\n\
          Usage:\n\
            ghidrust version | --version | -V [--json]\n\
+           ghidrust batch-decompile <path> [--address HEX ...] [--workers N] [--memory-budget-gb 4]\n\
+                     [--output DIR] [--checkpoint FILE] [--format jsonl|c] [--resume]\n\
            ghidrust load <path|--project DIR --file-id ID> [--out FILE] [--json]\n\
            ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--linear|--flow]\n\
                      [--brief|--pretty] [--out FILE] [--json]\n\
@@ -1867,6 +1878,101 @@ fn cmd_rtti(args: &[String], json: bool) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprintln!("usage: ghidrust batch-decompile <path> [--address HEX] [--workers N] [--memory-budget-gb 4]");
+        return ExitCode::from(2);
+    };
+    let mut config = BatchConfig {
+        binary_path: path.into(),
+        ..BatchConfig::default()
+    };
+    let mut i = 1;
+    while i < args.len() {
+        let parsed = match args[i].as_str() {
+            "--workers" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|n| {
+                config.workers = n;
+                2
+            }),
+            "--memory-budget-gb" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|n| {
+                config.memory_budget_gb = n;
+                2
+            }),
+            "--output" => args.get(i + 1).map(|v| {
+                config.output_dir = v.into();
+                2
+            }),
+            "--checkpoint" => args.get(i + 1).map(|v| {
+                config.checkpoint_path = Some(v.into());
+                2
+            }),
+            "--format" => args
+                .get(i + 1)
+                .and_then(|v| OutputFormat::from_str(v))
+                .map(|v| {
+                    config.format = v;
+                    2
+                }),
+            "--min-function-size" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|v| {
+                config.filter.min_function_size = v;
+                2
+            }),
+            "--max-functions" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|v| {
+                config.filter.max_functions = v;
+                2
+            }),
+            "--address" => args
+                .get(i + 1)
+                .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                .map(|v| {
+                    config.filter.addresses.push(v);
+                    2
+                }),
+            "--resume" => {
+                config.resume = true;
+                Some(1)
+            }
+            "--no-resume" => {
+                config.resume = false;
+                Some(1)
+            }
+            _ => None,
+        };
+        match parsed {
+            Some(step) => i += step,
+            None => {
+                eprintln!("invalid batch option/value: {}", args[i]);
+                return ExitCode::from(2);
+            }
+        }
+    }
+    match BatchEngine::new(config).run() {
+        Ok(result) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                );
+            } else {
+                eprintln!("[batch] {} attempted: {} succeeded, {} failed, {:.1} fn/s, peak private commit {:.0} MiB", result.attempted, result.succeeded, result.failed, result.throughput_fn_per_sec, result.peak_committed_mb);
+            }
+            if result.failed == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            if json {
+                println!("{}", json!({"ok": false, "error": error}));
+            } else {
+                eprintln!("batch-decompile: {error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -4728,7 +4834,10 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("session_id")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "missing arguments.session_id".to_string())?;
-            let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
+            let tid = args
+                .get("thread_id")
+                .and_then(|t| t.as_u64())
+                .map(|t| t as u32);
             process_step_into(sid, tid)?;
             Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
         }
@@ -4737,7 +4846,10 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("session_id")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "missing arguments.session_id".to_string())?;
-            let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
+            let tid = args
+                .get("thread_id")
+                .and_then(|t| t.as_u64())
+                .map(|t| t as u32);
             process_step_over(sid, tid)?;
             Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
         }
@@ -4746,7 +4858,10 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("session_id")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "missing arguments.session_id".to_string())?;
-            let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
+            let tid = args
+                .get("thread_id")
+                .and_then(|t| t.as_u64())
+                .map(|t| t as u32);
             process_step_out(sid, tid)?;
             Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
         }
@@ -4826,10 +4941,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                     .get("module")
                     .and_then(|m| m.as_str())
                     .map(|s| s.to_string()),
-                max_hits: args
-                    .get("max_hits")
-                    .and_then(|m| m.as_u64())
-                    .unwrap_or(256) as usize,
+                max_hits: args.get("max_hits").and_then(|m| m.as_u64()).unwrap_or(256) as usize,
                 diff_wait_ms: args.get("diff_wait_ms").and_then(|d| d.as_u64()),
                 ..ScanOpts::default()
             };
@@ -4862,10 +4974,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "missing arguments.addr".to_string())?,
             )?;
-            let max_slots = args
-                .get("max_slots")
-                .and_then(|m| m.as_u64())
-                .unwrap_or(32) as usize;
+            let max_slots = args.get("max_slots").and_then(|m| m.as_u64()).unwrap_or(32) as usize;
             let r = process_vtable_probe(sid, addr, max_slots)?;
             Ok(serde_json::to_string_pretty(&r).unwrap())
         }
