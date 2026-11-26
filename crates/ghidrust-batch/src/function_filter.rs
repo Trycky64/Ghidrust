@@ -166,3 +166,27 @@ fn pct(n: usize, total: usize) -> f64 {
         n as f64 / total as f64 * 100.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_exact_entry_addresses_and_composes_with_size_filter() {
+        let functions = vec![
+            FunctionInfo::new(0x1000, 0x1010, "small"),
+            FunctionInfo::new(0x2000, 0x2100, "selected"),
+            FunctionInfo::new(0x3000, 0x3100, "other"),
+        ];
+        let filter = FunctionFilter {
+            min_function_size: 0x20,
+            max_functions: 0,
+            addresses: vec![0x1000, 0x2000],
+        };
+        let selected = filter.apply(&functions);
+        assert_eq!(
+            selected.iter().map(|f| f.entry).collect::<Vec<_>>(),
+            [0x2000]
+        );
+    }
+}

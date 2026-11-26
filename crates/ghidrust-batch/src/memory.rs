@@ -80,6 +80,7 @@ fn windows_committed_pair() -> (u64, u64) {
         let handle = GetCurrentProcess();
         let mut pmc = MaybeUninit::<PROCESS_MEMORY_COUNTERS>::zeroed();
         let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        (*pmc.as_mut_ptr()).cb = size;
         if GetProcessMemoryInfo(handle, pmc.as_mut_ptr(), size) != 0 {
             let pmc = pmc.assume_init();
             (pmc.PagefileUsage as u64, pmc.PeakPagefileUsage as u64)

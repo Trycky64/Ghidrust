@@ -17,6 +17,8 @@ pub struct WorkerRequest {
     pub conv: CallConv,
     pub hints: StructureHints,
     pub emit_hints: EmitHints,
+    #[cfg(feature = "test-worker-crash")]
+    pub crash_for_test: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +49,7 @@ impl WorkerResponse {
 
 /// Serve requests until EOF. One process is reused for many independent functions.
 pub fn run_stdio_worker() -> Result<(), String> {
+    crate::job::verify_supervisor_budget(4.0)?;
     crate::job::verify_current_process_in_any_job()?;
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
@@ -57,6 +60,10 @@ pub fn run_stdio_worker() -> Result<(), String> {
         }
         let request: WorkerRequest =
             serde_json::from_str(&line).map_err(|e| format!("invalid worker request: {e}"))?;
+        #[cfg(feature = "test-worker-crash")]
+        if request.crash_for_test {
+            std::process::exit(17);
+        }
         let start = Instant::now();
         let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             decompile_instructions_stage1_full(

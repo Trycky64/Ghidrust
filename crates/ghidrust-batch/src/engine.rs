@@ -189,15 +189,18 @@ impl BatchEngine {
             .unwrap_or_else(|| self.config.output_dir.join("batch_checkpoint.txt"));
         let resume_existing = checkpoint_path.exists();
         let mut checkpoint = Checkpoint::new(&checkpoint_path, fingerprint.clone());
-        if self.config.resume || resume_existing {
+        if self.config.resume && resume_existing {
             checkpoint
                 .load()
                 .map_err(|e| format!("checkpoint does not match input or is corrupt: {e}"))?;
         }
         let skipped_checkpoint = checkpoint.completed_count();
-        checkpoint
-            .open_for_append()
-            .map_err(|e| format!("checkpoint open: {e}"))?;
+        if self.config.resume {
+            checkpoint.open_for_append()
+        } else {
+            checkpoint.reset()
+        }
+        .map_err(|e| format!("checkpoint open: {e}"))?;
         let targets: Vec<FunctionInfo> = selected
             .into_iter()
             .filter(|f| !checkpoint.is_completed(f.entry))
@@ -285,27 +288,35 @@ impl BatchEngine {
         let mut failed = 0usize;
         let mut total_us = 0u128;
         let mut peak_committed = memory::current_committed_bytes();
+        let mut io_error = None;
         for outcome in result_rx {
             total_us = total_us.saturating_add(outcome.decompile_us);
+            let written = match output.write_outcome(&outcome) {
+                Ok(()) => true,
+                Err(e) => {
+                    io_error.get_or_insert_with(|| format!("output write: {e}"));
+                    false
+                }
+            };
             if outcome.error.is_none() {
                 succeeded += 1;
-                output
-                    .write_outcome(&outcome)
-                    .map_err(|e| format!("output write: {e}"))?;
-                checkpoint
-                    .record(outcome.address)
-                    .map_err(|e| format!("checkpoint write: {e}"))?;
+                if written {
+                    if let Err(e) = checkpoint.record(outcome.address) {
+                        io_error.get_or_insert_with(|| format!("checkpoint write: {e}"));
+                    }
+                }
             } else {
                 failed += 1;
-                output
-                    .write_outcome(&outcome)
-                    .map_err(|e| format!("output write: {e}"))?;
             }
             peak_committed = peak_committed.max(memory::current_committed_bytes());
         }
-        output
-            .finish()
-            .map_err(|e| format!("output finalize: {e}"))?;
+        if let Err(e) = output.finish() {
+            io_error.get_or_insert_with(|| format!("output finalize: {e}"));
+        }
+        peak_committed = peak_committed.max(job::supervisor_peak_committed_bytes().unwrap_or(0));
+        if let Some(error) = io_error {
+            return Err(error);
+        }
         Ok(self.result(
             program.name.clone(),
             all_functions,
@@ -391,6 +402,29 @@ impl BatchEngine {
         workers: usize,
         budget_gb: f64,
     ) -> Result<BatchResult, String> {
+        Self::run_synthetic_workload(worker, output_dir, count, workers, budget_gb, false)
+    }
+
+    #[cfg(feature = "test-worker-crash")]
+    #[doc(hidden)]
+    pub fn run_synthetic_worker_crash_test(
+        worker: PathBuf,
+        output_dir: PathBuf,
+        count: usize,
+        workers: usize,
+        budget_gb: f64,
+    ) -> Result<BatchResult, String> {
+        Self::run_synthetic_workload(worker, output_dir, count, workers, budget_gb, true)
+    }
+
+    fn run_synthetic_workload(
+        worker: PathBuf,
+        output_dir: PathBuf,
+        count: usize,
+        workers: usize,
+        budget_gb: f64,
+        crash_first: bool,
+    ) -> Result<BatchResult, String> {
         validate_budget(budget_gb)?;
         job::verify_supervisor_budget(budget_gb)?;
         let started = Instant::now();
@@ -430,7 +464,11 @@ impl BatchEngine {
                 FunctionInfo::new(
                     0x1000 + i as u64,
                     0x1001 + i as u64,
-                    format!("synthetic_{i}"),
+                    if crash_first && i == 0 {
+                        "__worker_crash_test__".into()
+                    } else {
+                        format!("synthetic_{i}")
+                    },
                 )
             })
             .collect();
@@ -472,6 +510,7 @@ impl BatchEngine {
             .join()
             .map_err(|_| "synthetic task producer panicked")?;
         output.finish().map_err(|e| e.to_string())?;
+        peak = peak.max(job::supervisor_peak_committed_bytes().unwrap_or(0));
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(BatchResult {
             binary: "synthetic".into(),
@@ -526,6 +565,8 @@ fn worker_loop(
                     conv,
                     hints: hints.clone(),
                     emit_hints: emit_hints.clone(),
+                    #[cfg(feature = "test-worker-crash")]
+                    crash_for_test: function.name == "__worker_crash_test__",
                 };
                 let response = child
                     .as_mut()

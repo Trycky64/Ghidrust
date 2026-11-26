@@ -89,6 +89,23 @@ impl Checkpoint {
         Ok(())
     }
 
+    /// Start a new run, deliberately discarding only this checkpoint's prior state.
+    pub fn reset(&mut self) -> io::Result<()> {
+        self.completed.clear();
+        self.writer = None;
+        if self.path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = File::create(&self.path)?;
+        writeln!(file, "# ghidrust-checkpoint-v1 {}", self.fingerprint)?;
+        file.flush()?;
+        self.writer = Some(file);
+        Ok(())
+    }
+
     /// Record a completed function address.
     pub fn record(&mut self, addr: u64) -> io::Result<()> {
         self.completed.insert(addr);
@@ -152,5 +169,21 @@ mod tests {
             wrong_binary.load().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn reset_starts_clean_checkpoint_for_explicit_fresh_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt.txt");
+        let mut ckpt = Checkpoint::new(&path, "same-binary");
+        ckpt.open_for_append().unwrap();
+        ckpt.record(0x1000).unwrap();
+        ckpt.reset().unwrap();
+        ckpt.record(0x2000).unwrap();
+        drop(ckpt);
+        let mut check = Checkpoint::new(&path, "same-binary");
+        assert_eq!(check.load().unwrap(), 1);
+        assert!(!check.is_completed(0x1000));
+        assert!(check.is_completed(0x2000));
     }
 }

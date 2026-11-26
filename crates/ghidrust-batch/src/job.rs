@@ -127,8 +127,9 @@ mod imp {
     }
 
     pub fn verify_supervisor_budget(requested_gib: f64) -> Result<(), String> {
-        let name = std::env::var("GHIDRUST_MEMORY_GUARD_JOB")
-            .map_err(|_| "batch requires tools/memory_guard.py (named Windows Job Object)".to_string())?;
+        let name = std::env::var("GHIDRUST_MEMORY_GUARD_JOB").map_err(|_| {
+            "batch requires tools/memory_guard.py (named Windows Job Object)".to_string()
+        })?;
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, wide.as_ptr()) };
         if job.is_null() {
@@ -178,6 +179,30 @@ mod imp {
         Ok(())
     }
 
+    pub fn supervisor_peak_committed_bytes() -> Option<u64> {
+        let name = std::env::var("GHIDRUST_MEMORY_GUARD_JOB").ok()?;
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, wide.as_ptr()) };
+        if job.is_null() {
+            return None;
+        }
+        let mut info = ExtendedLimit::default();
+        let mut returned = 0u32;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of_val(&info) as u32,
+                &mut returned,
+            )
+        };
+        unsafe {
+            CloseHandle(job);
+        }
+        (ok != 0).then_some(info.peak_job_memory as u64)
+    }
+
     fn last_error(operation: &str) -> String {
         format!("{operation} failed with Win32 error {}", unsafe {
             GetLastError()
@@ -186,7 +211,10 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{verify_current_process_in_any_job, verify_supervisor_budget, WorkerJob};
+pub use imp::{
+    supervisor_peak_committed_bytes, verify_current_process_in_any_job, verify_supervisor_budget,
+    WorkerJob,
+};
 
 #[cfg(not(windows))]
 pub struct WorkerJob;
@@ -216,4 +244,8 @@ pub fn verify_supervisor_budget(_: f64) -> Result<(), String> {
 #[cfg(not(windows))]
 pub fn verify_current_process_in_any_job() -> Result<(), String> {
     Err("batch worker requires Windows Job Objects".into())
+}
+#[cfg(not(windows))]
+pub fn supervisor_peak_committed_bytes() -> Option<u64> {
+    None
 }

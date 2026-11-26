@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Batch decompilation engine: load once, decompile many functions in parallel"
 
+[features]
+test-worker-crash = []
+
 [dependencies]
 ghidrust-core = { workspace = true }
 ghidrust-decomp = { workspace = true }
