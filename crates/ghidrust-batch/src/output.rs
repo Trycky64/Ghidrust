@@ -2,8 +2,9 @@
 
 use crate::engine::FunctionOutcome;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Output format for batch decompilation.
@@ -26,11 +27,11 @@ impl OutputFormat {
 }
 
 /// One JSONL record.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct JsonlRecord {
     pub address: String,
     pub name: String,
-    pub status: &'static str,
+    pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pseudo_c: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +81,9 @@ impl OutputWriter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        if format == OutputFormat::Jsonl {
+            repair_jsonl_tail(&path)?;
+        }
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let writer = BufWriter::with_capacity(256 * 1024, file);
         Ok(Self {
@@ -98,8 +102,8 @@ impl OutputWriter {
                     address: format!("0x{:016x}", outcome.address),
                     name: outcome.name.clone(),
                     status: match &outcome.error {
-                        None => "ok",
-                        Some(_) => "error",
+                        None => "ok".to_string(),
+                        Some(_) => "error".to_string(),
                     },
                     pseudo_c: outcome.pseudo_c.clone(),
                     error: outcome.error.clone(),
@@ -128,10 +132,11 @@ impl OutputWriter {
         }
         self.count += 1;
         // Flush every 100 functions to bound memory.
-        if self.count % 100 == 0 {
-            self.writer.flush()?;
-        }
         Ok(())
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
     }
 
     /// Flush and finalize.
@@ -147,5 +152,72 @@ impl OutputWriter {
     /// Number of records written.
     pub fn count(&self) -> usize {
         self.count
+    }
+}
+
+/// Read successful JSONL addresses while repairing a crash-truncated final record.
+pub fn completed_jsonl_addresses(path: &Path) -> io::Result<HashSet<u64>> {
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+    repair_jsonl_tail(path)?;
+    let reader = BufReader::new(File::open(path)?);
+    let mut completed = HashSet::new();
+    for line in reader.lines() {
+        let line = line?;
+        let record: JsonlRecord = serde_json::from_str(&line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if record.status == "ok" {
+            if let Ok(address) = u64::from_str_radix(record.address.trim_start_matches("0x"), 16) {
+                completed.insert(address);
+            }
+        }
+    }
+    Ok(completed)
+}
+
+fn repair_jsonl_tail(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+    let mut pos = len;
+    while pos > 0 {
+        pos -= 1;
+        file.seek(SeekFrom::Start(pos))?;
+        file.read_exact(&mut last)?;
+        if last[0] == b'\n' {
+            file.set_len(pos + 1)?;
+            return Ok(());
+        }
+    }
+    file.set_len(0)
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_final_jsonl_record_is_removed_and_successes_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("results.jsonl");
+        std::fs::write(
+            &path,
+            "{\"address\":\"0x0000000000001234\",\"name\":\"f\",\"status\":\"ok\",\"insn_count\":1,\"decompile_us\":2,\"goto_count\":0,\"leaf_count\":1}\n{\"address\":",
+        ).unwrap();
+        let addresses = completed_jsonl_addresses(&path).unwrap();
+        assert_eq!(addresses, HashSet::from([0x1234]));
+        assert!(std::fs::read_to_string(path).unwrap().ends_with('\n'));
     }
 }

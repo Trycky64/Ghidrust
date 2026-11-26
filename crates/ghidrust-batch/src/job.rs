@@ -46,6 +46,19 @@ mod imp {
         peak_job_memory: usize,
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicAccounting {
+        total_user_time: i64,
+        total_kernel_time: i64,
+        this_period_user_time: i64,
+        this_period_kernel_time: i64,
+        total_page_faults: u32,
+        total_processes: u32,
+        active_processes: u32,
+        total_terminated_processes: u32,
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentProcess() -> *mut c_void;
@@ -203,6 +216,31 @@ mod imp {
         (ok != 0).then_some(info.peak_job_memory as u64)
     }
 
+    pub fn supervisor_cpu_time_ms() -> Option<u64> {
+        let name = std::env::var("GHIDRUST_MEMORY_GUARD_JOB").ok()?;
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, wide.as_ptr()) };
+        if job.is_null() {
+            return None;
+        }
+        let mut info = BasicAccounting::default();
+        let mut returned = 0u32;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                1,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of_val(&info) as u32,
+                &mut returned,
+            )
+        };
+        unsafe {
+            CloseHandle(job);
+        }
+        (ok != 0)
+            .then_some(((info.total_user_time + info.total_kernel_time).max(0) as u64) / 10_000)
+    }
+
     fn last_error(operation: &str) -> String {
         format!("{operation} failed with Win32 error {}", unsafe {
             GetLastError()
@@ -212,8 +250,8 @@ mod imp {
 
 #[cfg(windows)]
 pub use imp::{
-    supervisor_peak_committed_bytes, verify_current_process_in_any_job, verify_supervisor_budget,
-    WorkerJob,
+    supervisor_cpu_time_ms, supervisor_peak_committed_bytes, verify_current_process_in_any_job,
+    verify_supervisor_budget, WorkerJob,
 };
 
 #[cfg(not(windows))]
@@ -247,5 +285,9 @@ pub fn verify_current_process_in_any_job() -> Result<(), String> {
 }
 #[cfg(not(windows))]
 pub fn supervisor_peak_committed_bytes() -> Option<u64> {
+    None
+}
+#[cfg(not(windows))]
+pub fn supervisor_cpu_time_ms() -> Option<u64> {
     None
 }

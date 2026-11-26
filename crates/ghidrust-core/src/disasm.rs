@@ -52,6 +52,30 @@ fn open_engine_for(prog: &Program, opts: Option<&DisasmEngineOpts>) -> Result<En
     Ok(engine)
 }
 
+/// Reusable default decoder for callers that disassemble many functions from one program.
+/// The decoder is owned by its caller and should not be shared across worker threads.
+pub struct DisasmSession {
+    engine: Engine,
+}
+
+impl DisasmSession {
+    pub fn new(prog: &Program) -> Result<Self> {
+        Ok(Self {
+            engine: open_engine_for(prog, None)?,
+        })
+    }
+
+    /// Equivalent to [`disassemble_range`] while reusing the architecture decoder.
+    pub fn disassemble_range(
+        &mut self,
+        prog: &Program,
+        start: u64,
+        max_insns: usize,
+    ) -> Result<Vec<Instruction>> {
+        Ok(disasm_linear(prog, &mut self.engine, start, max_insns, false)?.insns)
+    }
+}
+
 fn apply_engine_opts(engine: &mut Engine, opts: &DisasmEngineOpts) -> Result<()> {
     if let Some(v) = opts.syntax {
         engine
@@ -590,6 +614,33 @@ mod tests {
         assert_eq!(i0.operands, "eax, eax");
         let i1 = decode_one(&b[2..], 2).unwrap();
         assert_eq!(i1.mnemonic, "ret");
+    }
+
+    #[test]
+    fn reusable_session_matches_independent_range_decoders() {
+        let base = 0x1400_01000;
+        let bytes = vec![0x31, 0xc0, 0xc3, 0xcc, 0x55, 0x48, 0x89, 0xe5, 0xc3];
+        let mut prog = Program::new("session".into(), "PE32+");
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: base,
+            size: bytes.len() as u64,
+            bytes,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        let mut session = DisasmSession::new(&prog).unwrap();
+        for (entry, max) in [(base, 3), (base + 4, 4), (base, 3)] {
+            let reusable = session.disassemble_range(&prog, entry, max).unwrap();
+            let independent = disassemble_range(&prog, entry, max).unwrap();
+            let shape = |list: &[Instruction]| {
+                list.iter()
+                    .map(|i| (i.address, i.length, i.mnemonic.clone(), i.operands.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(shape(&reusable), shape(&independent));
+        }
     }
 
     #[test]

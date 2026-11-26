@@ -46,6 +46,18 @@ pub fn system_commit_spare_bytes() -> Option<u64> {
     }
 }
 
+/// Current system commit charge, measured with GetPerformanceInfo on Windows.
+pub fn system_commit_used_bytes() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        windows_system_commit().map(|(used, _)| used)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Get a full memory snapshot (process + system).
 pub fn snapshot() -> MemorySnapshot {
     #[cfg(windows)]

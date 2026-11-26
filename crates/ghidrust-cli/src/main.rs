@@ -217,6 +217,7 @@ fn main() -> ExitCode {
             }
         },
         "batch-decompile" => cmd_batch_decompile(&args[1..], json_mode),
+        "batch-synthetic-bench" => cmd_batch_synthetic_bench(&args[1..], json_mode),
         "help" | "-h" | "-help" => {
             print_help();
             ExitCode::SUCCESS
@@ -1885,7 +1886,7 @@ fn cmd_rtti(args: &[String], json: bool) -> ExitCode {
 
 fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
     let Some(path) = args.first() else {
-        eprintln!("usage: ghidrust batch-decompile <path> [--address HEX] [--workers N] [--memory-budget-gb 4]");
+        eprintln!("usage: ghidrust batch-decompile <path> [--address HEX] [--workers N] [--function-timeout-seconds N] [--memory-budget-gb 4]");
         return ExitCode::from(2);
     };
     let mut config = BatchConfig {
@@ -1903,6 +1904,14 @@ fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
                 config.memory_budget_gb = n;
                 2
             }),
+            "function-timeout-seconds" => {
+                args.get(i + 1)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|n| {
+                        config.function_timeout = std::time::Duration::from_secs(n);
+                        2
+                    })
+            }
             "output" => args.get(i + 1).map(|v| {
                 config.output_dir = v.into();
                 2
@@ -1959,7 +1968,7 @@ fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
                     serde_json::to_string_pretty(&result).unwrap_or_default()
                 );
             } else {
-                eprintln!("[batch] {} attempted: {} succeeded, {} failed, {:.1} fn/s, peak private commit {:.0} MiB", result.attempted, result.succeeded, result.failed, result.throughput_fn_per_sec, result.peak_committed_mb);
+                eprintln!("[batch] {} attempted: {} succeeded, {} failed, workers={}/{}, {:.1} fn/s, peak private commit {:.0} MiB", result.attempted, result.succeeded, result.failed, result.effective_workers, result.requested_workers, result.throughput_fn_per_sec, result.peak_committed_mb);
             }
             if result.failed == 0 {
                 ExitCode::SUCCESS
@@ -1973,6 +1982,74 @@ fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
             } else {
                 eprintln!("batch-decompile: {error}");
             }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_batch_synthetic_bench(args: &[String], json: bool) -> ExitCode {
+    let Some(count) = args.first().and_then(|v| v.parse::<usize>().ok()) else {
+        eprintln!("usage: ghidrust batch-synthetic-bench <count> [--workers N] [--output DIR]");
+        return ExitCode::from(2);
+    };
+    let mut workers = 0usize;
+    let mut output = std::env::temp_dir().join("ghidrust-synthetic-batch");
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].trim_start_matches('-') {
+            "workers" if i + 1 < args.len() => {
+                let Some(value) = args[i + 1].parse().ok() else {
+                    return ExitCode::from(2);
+                };
+                workers = value;
+                i += 2;
+            }
+            "output" if i + 1 < args.len() => {
+                output = args[i + 1].clone().into();
+                i += 2;
+            }
+            _ => {
+                eprintln!("invalid synthetic benchmark option: {}", args[i]);
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let exe = match std::env::current_exe() {
+        Ok(path) => path.with_file_name(if cfg!(windows) {
+            "ghidrust-batch-worker.exe"
+        } else {
+            "ghidrust-batch-worker"
+        }),
+        Err(error) => {
+            eprintln!("current executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match BatchEngine::run_synthetic_benchmark(exe, output, count, workers, 4.0) {
+        Ok(result) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                );
+            } else {
+                eprintln!(
+                    "synthetic functions={} succeeded={} workers={}/{} throughput={:.1} fn/s",
+                    result.attempted,
+                    result.succeeded,
+                    result.effective_workers,
+                    result.requested_workers,
+                    result.throughput_fn_per_sec
+                );
+            }
+            if result.failed == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("synthetic benchmark error: {error}");
             ExitCode::FAILURE
         }
     }

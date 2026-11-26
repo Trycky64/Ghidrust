@@ -1401,6 +1401,7 @@ dependencies = [
 name = "ghidrust-batch"
 version = "0.1.2"
 dependencies = [
+ "bincode",
  "crossbeam-channel",
  "ghidrust-core",
  "ghidrust-decomp",

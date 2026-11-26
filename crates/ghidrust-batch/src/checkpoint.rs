@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Manages an append-only checkpoint file.
@@ -12,7 +12,7 @@ pub struct Checkpoint {
     path: PathBuf,
     fingerprint: String,
     completed: HashSet<u64>,
-    writer: Option<File>,
+    writer: Option<BufWriter<File>>,
 }
 
 impl Checkpoint {
@@ -41,6 +41,7 @@ impl Checkpoint {
         if !self.path.exists() {
             return Ok(0);
         }
+        repair_checkpoint_tail(&self.path)?;
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
         self.completed.clear();
@@ -79,7 +80,7 @@ impl Checkpoint {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        self.writer = Some(file);
+        self.writer = Some(BufWriter::new(file));
         if !existed {
             if let Some(w) = &mut self.writer {
                 writeln!(w, "# ghidrust-checkpoint-v1 {}", self.fingerprint)?;
@@ -102,7 +103,7 @@ impl Checkpoint {
         let mut file = File::create(&self.path)?;
         writeln!(file, "# ghidrust-checkpoint-v1 {}", self.fingerprint)?;
         file.flush()?;
-        self.writer = Some(file);
+        self.writer = Some(BufWriter::new(file));
         Ok(())
     }
 
@@ -111,9 +112,21 @@ impl Checkpoint {
         self.completed.insert(addr);
         if let Some(ref mut w) = self.writer {
             writeln!(w, "{addr:016x}")?;
-            w.flush()?;
         }
         Ok(())
+    }
+
+    /// Flush completed addresses after the corresponding output records are flushed.
+    pub fn flush(&mut self) -> io::Result<()> {
+        if let Some(writer) = &mut self.writer {
+            writer.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Mark an address recovered from a durable JSONL export without appending it again.
+    pub fn mark_completed(&mut self, addr: u64) {
+        self.completed.insert(addr);
     }
 
     /// Check if an address was already completed.
@@ -130,6 +143,31 @@ impl Checkpoint {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn repair_checkpoint_tail(path: &Path) -> io::Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte)?;
+    if byte[0] == b'\n' {
+        return Ok(());
+    }
+    let mut pos = len;
+    while pos > 0 {
+        pos -= 1;
+        file.seek(SeekFrom::Start(pos))?;
+        file.read_exact(&mut byte)?;
+        if byte[0] == b'\n' {
+            file.set_len(pos + 1)?;
+            return Ok(());
+        }
+    }
+    file.set_len(0)
 }
 
 #[cfg(test)]

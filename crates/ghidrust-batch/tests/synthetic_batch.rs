@@ -55,7 +55,7 @@ fn full_pipeline_filters_by_address_and_resumes_matching_checkpoint() {
     assert_eq!(first.failed, 0);
     let output_path = config.output_dir.join("synthetic-pe_exe.jsonl");
     assert_eq!(
-        std::fs::read_to_string(output_path)
+        std::fs::read_to_string(&output_path)
             .unwrap()
             .lines()
             .count(),
@@ -63,11 +63,31 @@ fn full_pipeline_filters_by_address_and_resumes_matching_checkpoint() {
     );
 
     config.resume = true;
+    let checkpoint_path = config.output_dir.join("batch_checkpoint.txt");
+    std::fs::write(
+        &checkpoint_path,
+        std::fs::read_to_string(&checkpoint_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+            + "\n",
+    )
+    .unwrap();
     let resumed = BatchEngine::new(config)
         .run()
-        .expect("resume synthetic PE pipeline");
+        .expect("resume from durable JSONL after checkpoint loss");
     assert_eq!(resumed.skipped_checkpoint, 1);
     assert_eq!(resumed.attempted, 0);
+    assert_eq!(
+        std::fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "resume must not duplicate a successful export row"
+    );
 }
 
 fn synthetic_pe() -> Vec<u8> {
@@ -150,6 +170,26 @@ fn crashed_worker_is_reported_and_replaced() {
     assert_eq!(result.attempted, 5);
     assert_eq!(result.failed, 1);
     assert_eq!(result.succeeded, 4);
+    let rows = std::fs::read_to_string(root.path().join("synthetic.jsonl")).unwrap();
+    assert_eq!(rows.lines().count(), 5);
+}
+
+#[test]
+#[cfg(feature = "test-worker-crash")]
+fn timed_out_function_is_failed_and_worker_is_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    let result = BatchEngine::run_synthetic_worker_timeout_test(
+        PathBuf::from(env!("CARGO_BIN_EXE_ghidrust-batch-worker")),
+        root.path().to_path_buf(),
+        5,
+        1,
+        4.0,
+    )
+    .expect("worker timeout recovery run");
+    assert_eq!(result.attempted, 5);
+    assert_eq!(result.failed, 1);
+    assert_eq!(result.succeeded, 4);
+    assert_eq!(result.worker_restarts, 1);
     let rows = std::fs::read_to_string(root.path().join("synthetic.jsonl")).unwrap();
     assert_eq!(rows.lines().count(), 5);
 }
