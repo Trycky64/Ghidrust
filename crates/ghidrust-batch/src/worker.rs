@@ -51,6 +51,16 @@ impl WorkerResponse {
 pub fn run_stdio_worker() -> Result<(), String> {
     crate::job::verify_supervisor_budget(4.0)?;
     crate::job::verify_current_process_in_any_job()?;
+    std::thread::Builder::new()
+        .name("ghidrust-batch-worker-loop".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_stdio_worker_inner)
+        .map_err(|e| format!("worker loop thread: {e}"))?
+        .join()
+        .map_err(|_| "worker loop thread panicked".to_string())?
+}
+
+fn run_stdio_worker_inner() -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     for line in stdin.lock().lines() {

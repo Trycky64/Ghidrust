@@ -168,13 +168,28 @@ impl BatchEngine {
     }
 
     pub fn run(&self) -> Result<BatchResult, String> {
+        let config = self.config.clone();
+        std::thread::Builder::new()
+            .name("ghidrust-batch-controller".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || Self { config }.run_inner())
+            .map_err(|e| format!("batch controller thread: {e}"))?
+            .join()
+            .map_err(|_| "batch controller thread panicked".to_string())?
+    }
+
+    fn run_inner(&self) -> Result<BatchResult, String> {
         let started = Instant::now();
         validate_budget(self.config.memory_budget_gb)?;
         job::verify_supervisor_budget(self.config.memory_budget_gb)?;
+        eprintln!("[batch] supervisor Job Object verified");
 
         let fingerprint = fingerprint_file(&self.config.binary_path)?;
+        eprintln!("[batch] input fingerprinted");
         let mut program = load_path(&self.config.binary_path).map_err(|e| format!("load: {e}"))?;
+        eprintln!("[batch] binary loaded");
         run_analyzers(&mut program, &[]).map_err(|e| format!("analysis: {e}"))?;
+        eprintln!("[batch] analyzers completed");
         let analysis = FunctionStartAnalysis::analyze(&program.analysis.functions);
         let all_functions = program.analysis.functions.len();
         let selected = self.config.filter.apply(&program.analysis.functions);
@@ -207,6 +222,7 @@ impl BatchEngine {
             .cloned()
             .collect();
         let attempted = targets.len();
+        eprintln!("[batch] selected {attempted} functions");
         let output_path = self.output_path(&program.name);
         let mut output = if resume_existing && self.config.resume {
             OutputWriter::open_append(&output_path, self.config.format)
@@ -236,6 +252,7 @@ impl BatchEngine {
 
         let worker_path = self.worker_path()?;
         let worker_job = WorkerJob::create(self.config.memory_budget_gb)?;
+        eprintln!("[batch] shared worker Job Object created");
         let program = Arc::new(program);
         let target_rx = {
             let (tx, rx) = bounded::<BatchTask>(workers * 2);

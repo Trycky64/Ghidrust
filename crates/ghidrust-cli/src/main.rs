@@ -1894,50 +1894,50 @@ fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
     };
     let mut i = 1;
     while i < args.len() {
-        let parsed = match args[i].as_str() {
-            "--workers" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|n| {
+        let parsed = match args[i].trim_start_matches('-') {
+            "workers" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|n| {
                 config.workers = n;
                 2
             }),
-            "--memory-budget-gb" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|n| {
+            "memory-budget-gb" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|n| {
                 config.memory_budget_gb = n;
                 2
             }),
-            "--output" => args.get(i + 1).map(|v| {
+            "output" => args.get(i + 1).map(|v| {
                 config.output_dir = v.into();
                 2
             }),
-            "--checkpoint" => args.get(i + 1).map(|v| {
+            "checkpoint" => args.get(i + 1).map(|v| {
                 config.checkpoint_path = Some(v.into());
                 2
             }),
-            "--format" => args
+            "format" => args
                 .get(i + 1)
                 .and_then(|v| OutputFormat::from_str(v))
                 .map(|v| {
                     config.format = v;
                     2
                 }),
-            "--min-function-size" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|v| {
+            "min-function-size" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|v| {
                 config.filter.min_function_size = v;
                 2
             }),
-            "--max-functions" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|v| {
+            "max-functions" => args.get(i + 1).and_then(|v| v.parse().ok()).map(|v| {
                 config.filter.max_functions = v;
                 2
             }),
-            "--address" => args
+            "address" => args
                 .get(i + 1)
                 .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                 .map(|v| {
                     config.filter.addresses.push(v);
                     2
                 }),
-            "--resume" => {
+            "resume" => {
                 config.resume = true;
                 Some(1)
             }
-            "--no-resume" => {
+            "no-resume" => {
                 config.resume = false;
                 Some(1)
             }
