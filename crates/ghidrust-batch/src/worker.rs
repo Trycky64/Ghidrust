@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufReader, Read, Write};
 use std::time::Instant;
 
+/// Bound a single returned function before IPC and JSONL serialization.
+/// Oversized text is reported as partial, never silently sliced.
+const MAX_PSEUDOCODE_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerRequest {
     pub entry: u64,
@@ -33,6 +37,10 @@ pub struct WorkerResponse {
     pub name: String,
     pub pseudo_c: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub partial_reason: Option<String>,
+    #[serde(default)]
+    pub structure_fallback: bool,
     pub decompile_us: u128,
     pub goto_count: usize,
     pub leaf_count: usize,
@@ -51,6 +59,8 @@ impl WorkerResponse {
             name: self.name,
             pseudo_c: self.pseudo_c,
             error: self.error,
+            partial_reason: self.partial_reason,
+            structure_fallback: self.structure_fallback,
             insn_count,
             decompile_us: self.decompile_us,
             goto_count: self.goto_count,
@@ -135,21 +145,33 @@ fn run_stdio_worker_inner() -> Result<(), String> {
                 emit_hints,
             )
         })) {
-            Ok((decomp, stage1)) => WorkerResponse {
-                address: request.entry,
-                name: request.name,
-                pseudo_c: Some(decomp.pseudo_c),
-                error: None,
-                decompile_us: start.elapsed().as_micros(),
-                goto_count: ghidrust_structure::goto_count(&stage1.structure.region),
-                leaf_count: ghidrust_structure::region_leaf_count(&stage1.structure.region),
-                request_deserialize_us,
-            },
+            Ok((decomp, stage1)) => {
+                let oversized = decomp.pseudo_c.len() > MAX_PSEUDOCODE_BYTES;
+                WorkerResponse {
+                    address: request.entry,
+                    name: request.name,
+                    pseudo_c: (!oversized).then_some(decomp.pseudo_c),
+                    error: None,
+                    partial_reason: oversized.then(|| {
+                        format!(
+                            "pseudocode exceeded the {} byte output limit",
+                            MAX_PSEUDOCODE_BYTES
+                        )
+                    }),
+                    structure_fallback: stage1.structure.unstructured_fallback,
+                    decompile_us: start.elapsed().as_micros(),
+                    goto_count: ghidrust_structure::goto_count(&stage1.structure.region),
+                    leaf_count: ghidrust_structure::region_leaf_count(&stage1.structure.region),
+                    request_deserialize_us,
+                }
+            }
             Err(_) => WorkerResponse {
                 address: request.entry,
                 name: request.name,
                 pseudo_c: None,
                 error: Some("worker panic caught".into()),
+                partial_reason: None,
+                structure_fallback: false,
                 decompile_us: start.elapsed().as_micros(),
                 goto_count: 0,
                 leaf_count: 0,
@@ -194,6 +216,8 @@ mod tests {
             name: "f".into(),
             pseudo_c: None,
             error: Some("synthetic failure".into()),
+            partial_reason: None,
+            structure_fallback: false,
             decompile_us: 3,
             goto_count: 0,
             leaf_count: 0,

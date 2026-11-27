@@ -32,6 +32,10 @@ pub struct JsonlRecord {
     pub address: String,
     pub name: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_reason: Option<String>,
+    #[serde(default)]
+    pub structure_fallback: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pseudo_c: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,10 +105,18 @@ impl OutputWriter {
                 let record = JsonlRecord {
                     address: format!("0x{:016x}", outcome.address),
                     name: outcome.name.clone(),
-                    status: match &outcome.error {
-                        None => "ok".to_string(),
-                        Some(_) => "error".to_string(),
-                    },
+                    status: if outcome.error.is_some() {
+                        "error"
+                    } else if outcome.partial_reason.is_some() {
+                        "partial"
+                    } else if outcome.structure_fallback {
+                        "unstructured_fallback"
+                    } else {
+                        "ok"
+                    }
+                    .to_string(),
+                    partial_reason: outcome.partial_reason.clone(),
+                    structure_fallback: outcome.structure_fallback,
                     pseudo_c: outcome.pseudo_c.clone(),
                     error: outcome.error.clone(),
                     insn_count: outcome.insn_count,
@@ -126,6 +138,15 @@ impl OutputWriter {
                     writeln!(self.writer, "{code}")?;
                 } else if let Some(ref err) = outcome.error {
                     writeln!(self.writer, "// ERROR: {err}")?;
+                }
+                if let Some(reason) = &outcome.partial_reason {
+                    writeln!(self.writer, "// PARTIAL: {reason}")?;
+                }
+                if outcome.structure_fallback {
+                    writeln!(
+                        self.writer,
+                        "// STRUCTURE: complete unstructured CFG fallback"
+                    )?;
                 }
                 writeln!(self.writer)?;
             }
@@ -167,7 +188,7 @@ pub fn completed_jsonl_addresses(path: &Path) -> io::Result<HashSet<u64>> {
         let line = line?;
         let record: JsonlRecord = serde_json::from_str(&line)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if record.status == "ok" {
+        if matches!(record.status.as_str(), "ok" | "unstructured_fallback") {
             if let Some(address) = parse_address(&record.address) {
                 completed.insert(address);
             }
@@ -198,9 +219,9 @@ fn compact_jsonl_for_resume(path: &Path) -> io::Result<()> {
         }
         let record: JsonlRecord = serde_json::from_slice(&line)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if record.status == "error" {
+        if matches!(record.status.as_str(), "error" | "partial") {
             needs_compaction = true;
-        } else if record.status == "ok" {
+        } else if matches!(record.status.as_str(), "ok" | "unstructured_fallback") {
             if let Some(address) = parse_address(&record.address) {
                 if !seen.insert(address) {
                     needs_compaction = true;
@@ -230,10 +251,10 @@ fn compact_jsonl_for_resume(path: &Path) -> io::Result<()> {
         }
         let record: JsonlRecord = serde_json::from_slice(&line)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if record.status == "error" {
+        if matches!(record.status.as_str(), "error" | "partial") {
             continue;
         }
-        if record.status == "ok" {
+        if matches!(record.status.as_str(), "ok" | "unstructured_fallback") {
             if let Some(address) = parse_address(&record.address) {
                 if !seen_successes.insert(address) {
                     continue;
@@ -300,8 +321,14 @@ mod recovery_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("results.jsonl");
         let success = r#"{"address":"0x0000000000001234","name":"ok","status":"ok","pseudo_c":"return 1;","insn_count":1,"decompile_us":2,"goto_count":0,"leaf_count":1}"#;
+        let fallback = r#"{"address":"0x0000000000009876","name":"fallback","status":"unstructured_fallback","structure_fallback":true,"pseudo_c":"goto block_1;","insn_count":3,"decompile_us":2,"goto_count":2,"leaf_count":2}"#;
+        let partial = r#"{"address":"0x0000000000007777","name":"partial","status":"partial","partial_reason":"instruction limit reached","pseudo_c":"return ?;","insn_count":4096,"decompile_us":2,"goto_count":0,"leaf_count":1}"#;
         let error = r#"{"address":"0x0000000000005678","name":"retry","status":"error","error":"worker exited","insn_count":0,"decompile_us":2,"goto_count":0,"leaf_count":0}"#;
-        std::fs::write(&path, format!("{success}\n{error}\n{success}\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{success}\n{fallback}\n{partial}\n{error}\n{success}\n"),
+        )
+        .unwrap();
 
         let mut output = OutputWriter::open_append(&path, OutputFormat::Jsonl).unwrap();
         output
@@ -310,6 +337,8 @@ mod recovery_tests {
                 name: "retry".into(),
                 pseudo_c: Some("return 2;".into()),
                 error: None,
+                partial_reason: None,
+                structure_fallback: false,
                 insn_count: 2,
                 decompile_us: 3,
                 goto_count: 0,
@@ -323,15 +352,22 @@ mod recovery_tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert_eq!(lines.iter().filter(|row| row.status == "ok").count(), 2);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|row| row.status == "unstructured_fallback")
+                .count(),
+            1
+        );
         assert_eq!(
             lines
                 .iter()
                 .map(|row| row.address.as_str())
                 .collect::<HashSet<_>>()
                 .len(),
-            2,
+            3,
             "resume must leave one final row per function address"
         );
     }

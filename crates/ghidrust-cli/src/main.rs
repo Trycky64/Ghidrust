@@ -1886,7 +1886,7 @@ fn cmd_rtti(args: &[String], json: bool) -> ExitCode {
 
 fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
     let Some(path) = args.first() else {
-        eprintln!("usage: ghidrust batch-decompile <path> [--address HEX] [--workers N] [--function-timeout-seconds N] [--memory-budget-gb 4]");
+        eprintln!("usage: ghidrust batch-decompile <path> [--address HEX] [--workers N] [--function-timeout-seconds N] [--max-insns-per-fn N] [--memory-budget-gb 4]");
         return ExitCode::from(2);
     };
     let mut config = BatchConfig {
@@ -1912,6 +1912,14 @@ fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
                         2
                     })
             }
+            "max-insns-per-fn" => args
+                .get(i + 1)
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .map(|n| {
+                    config.max_insns_per_fn = n;
+                    2
+                }),
             "output" => args.get(i + 1).map(|v| {
                 config.output_dir = v.into();
                 2
@@ -1968,9 +1976,9 @@ fn cmd_batch_decompile(args: &[String], json: bool) -> ExitCode {
                     serde_json::to_string_pretty(&result).unwrap_or_default()
                 );
             } else {
-                eprintln!("[batch] {} attempted: {} succeeded, {} failed, workers={}/{}, {:.1} fn/s, peak private commit {:.0} MiB", result.attempted, result.succeeded, result.failed, result.effective_workers, result.requested_workers, result.throughput_fn_per_sec, result.peak_committed_mb);
+                eprintln!("[batch] {} attempted: {} complete, {} unstructured fallback, {} partial, {} failed, workers={}/{}, {:.1} fn/s, peak private commit {:.0} MiB", result.attempted, result.succeeded, result.unstructured_fallback, result.partial, result.failed, result.effective_workers, result.requested_workers, result.throughput_fn_per_sec, result.peak_committed_mb);
             }
-            if result.failed == 0 {
+            if result.failed == 0 && result.partial == 0 {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

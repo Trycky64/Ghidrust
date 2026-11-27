@@ -7,7 +7,7 @@ use crate::memory;
 use crate::output::{completed_jsonl_addresses, OutputFormat, OutputWriter};
 use crate::worker::{WorkerRequest, WorkerResponse, WorkerTelemetry};
 use crossbeam_channel::{bounded, Receiver};
-use ghidrust_core::disasm::DisasmSession;
+use ghidrust_core::disasm::{DisasmSession, DisasmStopReason};
 use ghidrust_core::{load_path, run_analyzers, FunctionInfo, Instruction, Program};
 use ghidrust_decomp::{structure_hints_from, EmitHints};
 use ghidrust_structure::StructureHints;
@@ -74,6 +74,12 @@ pub struct FunctionOutcome {
     pub name: String,
     pub pseudo_c: Option<String>,
     pub error: Option<String>,
+    /// Present when the configured instruction cap prevented full analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_reason: Option<String>,
+    /// True when the complete CFG was emitted through the structurer fallback.
+    #[serde(default)]
+    pub structure_fallback: bool,
     pub insn_count: usize,
     pub decompile_us: u128,
     pub goto_count: usize,
@@ -87,6 +93,8 @@ pub struct BatchResult {
     pub attempted: usize,
     pub succeeded: usize,
     pub failed: usize,
+    pub partial: usize,
+    pub unstructured_fallback: usize,
     pub skipped_checkpoint: usize,
     pub skipped_filter: usize,
     pub total_wall_ms: f64,
@@ -434,6 +442,8 @@ impl BatchEngine {
                 0,
                 0,
                 0,
+                0,
+                0,
                 analysis,
                 workers,
                 load_ms,
@@ -506,6 +516,8 @@ impl BatchEngine {
 
         let mut succeeded = 0usize;
         let mut failed = 0usize;
+        let mut partial = 0usize;
+        let mut unstructured_fallback = 0usize;
         let mut total_us = 0u128;
         let mut peak_committed = memory::current_committed_bytes();
         let mut export_us = 0u64;
@@ -523,8 +535,12 @@ impl BatchEngine {
             };
             export_us = export_us
                 .saturating_add(output_started.elapsed().as_micros().min(u64::MAX as u128) as u64);
-            if outcome.error.is_none() {
-                succeeded += 1;
+            if outcome.error.is_none() && outcome.partial_reason.is_none() {
+                if outcome.structure_fallback {
+                    unstructured_fallback += 1;
+                } else {
+                    succeeded += 1;
+                }
                 if written {
                     let checkpoint_started = Instant::now();
                     if let Err(e) = checkpoint.record(outcome.address) {
@@ -537,8 +553,10 @@ impl BatchEngine {
                             .min(u64::MAX as u128) as u64,
                     );
                 }
-            } else {
+            } else if outcome.error.is_some() {
                 failed += 1;
+            } else {
+                partial += 1;
             }
             if completed % 100 == 99 || completed + 1 == attempted {
                 let flush_started = Instant::now();
@@ -586,6 +604,8 @@ impl BatchEngine {
             total_us,
             peak_committed,
             failed,
+            partial,
+            unstructured_fallback,
             analysis,
             workers,
             load_ms,
@@ -613,6 +633,8 @@ impl BatchEngine {
         total_us: u128,
         peak: u64,
         failed: usize,
+        partial: usize,
+        unstructured_fallback: usize,
         analysis: FunctionStartAnalysis,
         workers: usize,
         load_ms: f64,
@@ -640,6 +662,8 @@ impl BatchEngine {
             attempted,
             succeeded,
             failed,
+            partial,
+            unstructured_fallback,
             skipped_checkpoint,
             skipped_filter,
             total_wall_ms: ms,
@@ -874,6 +898,8 @@ impl BatchEngine {
                 .map_err(|e| e.to_string())?;
         let mut succeeded = 0;
         let mut failed = 0;
+        let mut partial = 0;
+        let mut unstructured_fallback = 0;
         let mut total_us = 0u128;
         let mut peak = memory::current_committed_bytes();
         let mut export_us = 0u64;
@@ -885,6 +911,10 @@ impl BatchEngine {
             total_us += outcome.decompile_us;
             if outcome.error.is_some() {
                 failed += 1;
+            } else if outcome.partial_reason.is_some() {
+                partial += 1;
+            } else if outcome.structure_fallback {
+                unstructured_fallback += 1;
             } else {
                 succeeded += 1;
             }
@@ -920,6 +950,8 @@ impl BatchEngine {
             attempted: count,
             succeeded,
             failed,
+            partial,
+            unstructured_fallback,
             skipped_checkpoint: 0,
             skipped_filter: 0,
             total_wall_ms: ms,
@@ -995,7 +1027,7 @@ fn worker_loop(
         let start = Instant::now();
         let disasm_started = Instant::now();
         let decoded = match task.prepared {
-            Some(instructions) => Ok(instructions),
+            Some(instructions) => Ok((instructions, None)),
             None => {
                 if decoder.is_none() {
                     let decoder_started = Instant::now();
@@ -1009,6 +1041,8 @@ fn worker_loop(
                                 name: function.name,
                                 pseudo_c: None,
                                 error: Some(format!("decoder init: {error}")),
+                                partial_reason: None,
+                                structure_fallback: false,
                                 insn_count: 0,
                                 decompile_us: start.elapsed().as_micros(),
                                 goto_count: 0,
@@ -1024,14 +1058,19 @@ fn worker_loop(
                 decoder
                     .as_mut()
                     .unwrap()
-                    .disassemble_range(&program, function.entry, max_insns)
+                    .disassemble_range_result(&program, function.entry, max_insns)
+                    .map(|result| {
+                        let partial_reason = (result.stop_reason == DisasmStopReason::Count)
+                            .then(|| format!("instruction limit reached ({max_insns})"));
+                        (result.insns, partial_reason)
+                    })
                     .map_err(|e| format!("disassembly: {e}"))
             }
         };
         add_us(&phase_metrics.disassembly_us, disasm_started.elapsed());
         let mut worker_failed = false;
         let result = match decoded {
-            Ok(instructions) => {
+            Ok((instructions, partial_reason)) => {
                 let count = instructions.len();
                 let send_metadata = child
                     .as_ref()
@@ -1063,8 +1102,15 @@ fn worker_loop(
                         worker.execute(&request, &phase_metrics, remaining)
                     });
                 worker_failed = response.is_err();
-                response.map(|r| {
+                response.map(|mut r| {
                     consecutive_failures = 0;
+                    r.partial_reason = match (r.partial_reason, partial_reason) {
+                        (Some(worker), Some(disassembly)) => {
+                            Some(format!("{disassembly}; {worker}"))
+                        }
+                        (Some(reason), None) | (None, Some(reason)) => Some(reason),
+                        (None, None) => None,
+                    };
                     r.into_outcome(count)
                 })
             }
@@ -1088,6 +1134,8 @@ fn worker_loop(
                     name: function.name,
                     pseudo_c: None,
                     error: Some(error),
+                    partial_reason: None,
+                    structure_fallback: false,
                     insn_count: 0,
                     decompile_us: start.elapsed().as_micros(),
                     goto_count: 0,

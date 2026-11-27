@@ -74,6 +74,25 @@ impl DisasmSession {
     ) -> Result<Vec<Instruction>> {
         Ok(disasm_linear(prog, &mut self.engine, start, max_insns, false)?.insns)
     }
+
+    /// Keep the stop reason so callers can report instruction-limit truncation.
+    pub fn disassemble_range_result(
+        &mut self,
+        prog: &Program,
+        start: u64,
+        max_insns: usize,
+    ) -> Result<DisasmRangeResult> {
+        let function = prog.function_containing(start);
+        disasm_bounded(
+            prog,
+            &mut self.engine,
+            start,
+            max_insns,
+            false,
+            function.map(|f| f.end),
+            function.map(|f| f.entry),
+        )
+    }
 }
 
 fn apply_engine_opts(engine: &mut Engine, opts: &DisasmEngineOpts) -> Result<()> {
@@ -405,8 +424,12 @@ fn disasm_bounded(
     if out.is_empty() {
         return Err(Error::Decode(format!("no instructions at {start:#x}")));
     }
-    if out.len() >= max_insns && stop_reason == DisasmStopReason::Count {
-        stop_reason = DisasmStopReason::Count;
+    if stop_reason == DisasmStopReason::Count {
+        stop_reason = if bound_end.is_some_and(|end| va >= end) {
+            DisasmStopReason::FunctionEnd
+        } else {
+            DisasmStopReason::Count
+        };
     }
     Ok(DisasmRangeResult {
         insns: out,
@@ -630,6 +653,9 @@ mod tests {
             writable: false,
             executable: true,
         });
+        prog.analysis
+            .functions
+            .push(crate::program::FunctionInfo::new(base, base + 3, "tiny"));
         let mut session = DisasmSession::new(&prog).unwrap();
         for (entry, max) in [(base, 3), (base + 4, 4), (base, 3)] {
             let reusable = session.disassemble_range(&prog, entry, max).unwrap();
@@ -641,6 +667,10 @@ mod tests {
             };
             assert_eq!(shape(&reusable), shape(&independent));
         }
+        let truncated = session.disassemble_range_result(&prog, base, 1).unwrap();
+        assert_eq!(truncated.stop_reason, DisasmStopReason::Count);
+        let complete = session.disassemble_range_result(&prog, base, 2).unwrap();
+        assert_eq!(complete.stop_reason, DisasmStopReason::FunctionEnd);
     }
 
     #[test]
