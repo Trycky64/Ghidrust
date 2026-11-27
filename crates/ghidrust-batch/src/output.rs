@@ -82,7 +82,7 @@ impl OutputWriter {
             std::fs::create_dir_all(parent)?;
         }
         if format == OutputFormat::Jsonl {
-            repair_jsonl_tail(&path)?;
+            compact_jsonl_for_resume(&path)?;
         }
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let writer = BufWriter::with_capacity(256 * 1024, file);
@@ -168,12 +168,86 @@ pub fn completed_jsonl_addresses(path: &Path) -> io::Result<HashSet<u64>> {
         let record: JsonlRecord = serde_json::from_str(&line)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if record.status == "ok" {
-            if let Ok(address) = u64::from_str_radix(record.address.trim_start_matches("0x"), 16) {
+            if let Some(address) = parse_address(&record.address) {
                 completed.insert(address);
             }
         }
     }
     Ok(completed)
+}
+
+fn parse_address(address: &str) -> Option<u64> {
+    u64::from_str_radix(address.trim_start_matches("0x"), 16).ok()
+}
+
+/// Remove stale failure rows and duplicate successes before retrying a JSONL
+/// output. The original remains intact until the compacted file is flushed and
+/// atomically replaces it, so interruption during compaction is recoverable.
+fn compact_jsonl_for_resume(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    repair_jsonl_tail(path)?;
+
+    let mut seen = HashSet::new();
+    let mut needs_compaction = false;
+    for line in BufReader::with_capacity(1024 * 1024, File::open(path)?).split(b'\n') {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let record: JsonlRecord = serde_json::from_slice(&line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if record.status == "error" {
+            needs_compaction = true;
+        } else if record.status == "ok" {
+            if let Some(address) = parse_address(&record.address) {
+                if !seen.insert(address) {
+                    needs_compaction = true;
+                }
+            }
+        }
+    }
+    if !needs_compaction {
+        return Ok(());
+    }
+
+    let mut temp_path = path.to_path_buf();
+    temp_path.set_extension("jsonl.resume.tmp");
+    let mut output = BufWriter::with_capacity(
+        1024 * 1024,
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temp_path)?,
+    );
+    let mut seen_successes = HashSet::new();
+    for line in BufReader::with_capacity(1024 * 1024, File::open(path)?).split(b'\n') {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let record: JsonlRecord = serde_json::from_slice(&line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if record.status == "error" {
+            continue;
+        }
+        if record.status == "ok" {
+            if let Some(address) = parse_address(&record.address) {
+                if !seen_successes.insert(address) {
+                    continue;
+                }
+            }
+        }
+        output.write_all(&line)?;
+        output.write_all(b"\n")?;
+    }
+    output.flush()?;
+    output.get_ref().sync_all()?;
+    drop(output);
+    std::fs::rename(&temp_path, path)?;
+    Ok(())
 }
 
 fn repair_jsonl_tail(path: &Path) -> io::Result<()> {
@@ -219,5 +293,46 @@ mod recovery_tests {
         let addresses = completed_jsonl_addresses(&path).unwrap();
         assert_eq!(addresses, HashSet::from([0x1234]));
         assert!(std::fs::read_to_string(path).unwrap().ends_with('\n'));
+    }
+
+    #[test]
+    fn resume_removes_stale_failures_and_deduplicates_successes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("results.jsonl");
+        let success = r#"{"address":"0x0000000000001234","name":"ok","status":"ok","pseudo_c":"return 1;","insn_count":1,"decompile_us":2,"goto_count":0,"leaf_count":1}"#;
+        let error = r#"{"address":"0x0000000000005678","name":"retry","status":"error","error":"worker exited","insn_count":0,"decompile_us":2,"goto_count":0,"leaf_count":0}"#;
+        std::fs::write(&path, format!("{success}\n{error}\n{success}\n")).unwrap();
+
+        let mut output = OutputWriter::open_append(&path, OutputFormat::Jsonl).unwrap();
+        output
+            .write_outcome(&FunctionOutcome {
+                address: 0x5678,
+                name: "retry".into(),
+                pseudo_c: Some("return 2;".into()),
+                error: None,
+                insn_count: 2,
+                decompile_us: 3,
+                goto_count: 0,
+                leaf_count: 1,
+            })
+            .unwrap();
+        output.finish().unwrap();
+
+        let lines: Vec<JsonlRecord> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.iter().filter(|row| row.status == "ok").count(), 2);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|row| row.address.as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            2,
+            "resume must leave one final row per function address"
+        );
     }
 }
