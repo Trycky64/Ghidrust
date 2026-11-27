@@ -156,6 +156,18 @@ fn add_us(counter: &AtomicU64, duration: std::time::Duration) {
     );
 }
 
+fn flush_output_before_checkpoint<O, C>(
+    flush_output: O,
+    flush_checkpoint: C,
+) -> Result<(), (&'static str, std::io::Error)>
+where
+    O: FnOnce() -> std::io::Result<()>,
+    C: FnOnce() -> std::io::Result<()>,
+{
+    flush_output().map_err(|error| ("output", error))?;
+    flush_checkpoint().map_err(|error| ("checkpoint", error))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyntheticTask {
     pub address: u64,
@@ -566,11 +578,13 @@ impl BatchEngine {
             }
             if completed % 100 == 99 || completed + 1 == attempted {
                 let flush_started = Instant::now();
-                if let Err(error) = output.flush() {
-                    io_error.get_or_insert_with(|| format!("output flush: {error}"));
-                }
-                if let Err(error) = checkpoint.flush() {
-                    io_error.get_or_insert_with(|| format!("checkpoint flush: {error}"));
+                if let Err((stage, error)) =
+                    flush_output_before_checkpoint(|| output.flush(), || checkpoint.flush())
+                {
+                    // A checkpoint entry must never become durable before the
+                    // output record it represents. On output failure, leaving
+                    // the checkpoint buffered lets resume retry that address.
+                    io_error.get_or_insert_with(|| format!("{stage} flush: {error}"));
                 }
                 checkpoint_us = checkpoint_us.saturating_add(
                     flush_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
@@ -589,11 +603,10 @@ impl BatchEngine {
                 eprintln!("[batch-progress] done={completed}/{attempted} rate={rate:.1}_fn/s job_commit_mb={:.1} system_commit_gb={:.2} eta_s={eta:.1}", peak_committed as f64 / 1_048_576.0, system_commit_peak as f64 / 1_073_741_824.0);
             }
         }
-        if let Err(e) = output.finish() {
-            io_error.get_or_insert_with(|| format!("output finalize: {e}"));
-        }
-        if let Err(e) = checkpoint.flush() {
-            io_error.get_or_insert_with(|| format!("checkpoint finalize: {e}"));
+        if let Err((stage, error)) =
+            flush_output_before_checkpoint(|| output.finish(), || checkpoint.flush())
+        {
+            io_error.get_or_insert_with(|| format!("{stage} finalize: {error}"));
         }
         peak_committed = peak_committed.max(job::supervisor_peak_committed_bytes().unwrap_or(0));
         if let Some(error) = io_error {
@@ -1247,5 +1260,25 @@ mod tests {
         let reason = disassembly_partial_reason(&result, 8).unwrap();
         assert!(reason.contains("0x140001001"), "{reason}");
         assert!(reason.contains("decode"), "{reason}");
+    }
+
+    #[test]
+    fn failed_output_flush_does_not_advance_checkpoint() {
+        use std::cell::Cell;
+
+        let checkpoint_advanced = Cell::new(false);
+        let result = flush_output_before_checkpoint(
+            || Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+            || {
+                checkpoint_advanced.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(("output", _))));
+        assert!(
+            !checkpoint_advanced.get(),
+            "checkpoint flush must not run after the output flush fails"
+        );
     }
 }
