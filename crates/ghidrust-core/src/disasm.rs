@@ -6,9 +6,9 @@
 use crate::error::{Error, Result};
 use crate::machine::{arch_mode_for_program, default_arch_mode};
 use crate::program::Program;
-pub use ghidrust_decode::{decode_one, Instruction};
 use ghidrust_decode::{Arch, Mode};
 use ghidrust_decode::{Engine, MnemOverride, Opt, SkipdataConfig, Syntax};
+pub use ghidrust_decode::{Instruction, decode_one};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 
@@ -76,22 +76,20 @@ impl DisasmSession {
     }
 
     /// Keep the stop reason so callers can report instruction-limit truncation.
+    ///
+    /// This intentionally mirrors [`Self::disassemble_range`]: inferred function
+    /// end addresses are useful metadata, but may be too short for a function
+    /// whose control flow or seed analysis is incomplete. Applying such an end
+    /// here silently dropped instructions compared with the ordinary linear
+    /// decoder, and incorrectly marked the result complete. Callers that need a
+    /// hard address bound should use the bounded disassembly API explicitly.
     pub fn disassemble_range_result(
         &mut self,
         prog: &Program,
         start: u64,
         max_insns: usize,
     ) -> Result<DisasmRangeResult> {
-        let function = prog.function_containing(start);
-        disasm_bounded(
-            prog,
-            &mut self.engine,
-            start,
-            max_insns,
-            false,
-            function.map(|f| f.end),
-            function.map(|f| f.entry),
-        )
+        disasm_linear(prog, &mut self.engine, start, max_insns, false)
     }
 }
 
@@ -669,8 +667,13 @@ mod tests {
         }
         let truncated = session.disassemble_range_result(&prog, base, 1).unwrap();
         assert_eq!(truncated.stop_reason, DisasmStopReason::Count);
-        let complete = session.disassemble_range_result(&prog, base, 2).unwrap();
-        assert_eq!(complete.stop_reason, DisasmStopReason::FunctionEnd);
+
+        // The metadata says this function ends at `base + 3`, but the result API
+        // must preserve the same linear decoding semantics as the ordinary API.
+        let result = session.disassemble_range_result(&prog, base, 8).unwrap();
+        let linear = session.disassemble_range(&prog, base, 8).unwrap();
+        assert_eq!(result.insns.len(), linear.len());
+        assert_eq!(result.stop_reason, DisasmStopReason::DecodeFail);
     }
 
     #[test]
