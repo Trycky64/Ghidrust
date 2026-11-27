@@ -6,9 +6,9 @@
 use crate::error::{Error, Result};
 use crate::machine::{arch_mode_for_program, default_arch_mode};
 use crate::program::Program;
+pub use ghidrust_decode::{decode_one, Instruction};
 use ghidrust_decode::{Arch, Mode};
 use ghidrust_decode::{Engine, MnemOverride, Opt, SkipdataConfig, Syntax};
-pub use ghidrust_decode::{Instruction, decode_one};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 

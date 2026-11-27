@@ -426,7 +426,7 @@ mod tests {
         data[coff + 16..coff + 18].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size
         let opt = coff + 20; // 0x98
         data[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+
-        // AddressOfEntryPoint RVA
+                                                                     // AddressOfEntryPoint RVA
         data[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
         // ImageBase
         data[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes());
@@ -439,7 +439,7 @@ mod tests {
         data[exc + 4..exc + 8].copy_from_slice(&12u32.to_le_bytes());
 
         let sec = opt + 0xF0; // section table
-        // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
+                              // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
         write_sec(
             &mut data,
             sec,
@@ -540,7 +540,7 @@ mod tests {
         // flags: version=1 (low 3) + CHAININFO (bit of flags << 3) → 0x01 | (0x4 << 3) = 0x21
         bytes[0x60C] = 0x21;
         bytes[0x60E] = 0x00; // no codes
-        // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
+                             // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
         bytes[0x610..0x614].copy_from_slice(&0u32.to_le_bytes());
         bytes[0x614..0x618].copy_from_slice(&0x1008u32.to_le_bytes());
         bytes[0x618..0x61C].copy_from_slice(&0x200Cu32.to_le_bytes());

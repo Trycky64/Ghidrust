@@ -3,7 +3,7 @@
 use super::AnalyzerOutput;
 use crate::error::Result;
 use crate::pe_functions::{
-    RuntimeFunction, grow_function, parse_export_code_vas, parse_runtime_functions,
+    grow_function, parse_export_code_vas, parse_runtime_functions, RuntimeFunction,
 };
 use crate::program::{FunctionInfo, FunctionSeedKind, Program};
 
