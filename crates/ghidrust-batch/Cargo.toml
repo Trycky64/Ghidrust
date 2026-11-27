@@ -1,0 +1,27 @@
+[package]
+name = "ghidrust-batch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Batch decompilation engine: load once, decompile many functions in parallel"
+
+[features]
+test-worker-crash = []
+
+[dependencies]
+ghidrust-core = { workspace = true }
+ghidrust-decomp = { workspace = true }
+ghidrust-types = { workspace = true }
+ghidrust-structure = { workspace = true }
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+sha2 = "0.10"
+
+[[bin]]
+name = "ghidrust-batch-worker"
+path = "src/bin/worker.rs"
+
+[dev-dependencies]
+tempfile = "3"

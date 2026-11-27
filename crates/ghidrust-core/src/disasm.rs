@@ -52,6 +52,58 @@ fn open_engine_for(prog: &Program, opts: Option<&DisasmEngineOpts>) -> Result<En
     Ok(engine)
 }
 
+/// Reusable default decoder for callers that disassemble many functions from one program.
+/// The decoder is owned by its caller and should not be shared across worker threads.
+pub struct DisasmSession {
+    engine: Engine,
+}
+
+impl DisasmSession {
+    pub fn new(prog: &Program) -> Result<Self> {
+        Ok(Self {
+            engine: open_engine_for(prog, None)?,
+        })
+    }
+
+    /// Equivalent to [`disassemble_range`] while reusing the architecture decoder.
+    pub fn disassemble_range(
+        &mut self,
+        prog: &Program,
+        start: u64,
+        max_insns: usize,
+    ) -> Result<Vec<Instruction>> {
+        Ok(disasm_linear(prog, &mut self.engine, start, max_insns, false)?.insns)
+    }
+
+    /// Keep the stop reason so callers can report instruction-limit truncation.
+    ///
+    /// Inferred function ends may be too short for a function whose control
+    /// flow or seed analysis is incomplete, so those retain the same linear
+    /// behavior as [`Self::disassemble_range`]. Exact PE `.pdata` ends are
+    /// authoritative and safely bound the result to a known runtime function.
+    pub fn disassemble_range_result(
+        &mut self,
+        prog: &Program,
+        start: u64,
+        max_insns: usize,
+    ) -> Result<DisasmRangeResult> {
+        if let Some(function) = prog.function_containing(start).filter(|f| {
+            f.seed_kind == Some(crate::program::FunctionSeedKind::Pdata) && f.end > f.entry
+        }) {
+            return disasm_bounded(
+                prog,
+                &mut self.engine,
+                start,
+                max_insns,
+                false,
+                Some(function.end),
+                Some(function.entry),
+            );
+        }
+        disasm_linear(prog, &mut self.engine, start, max_insns, false)
+    }
+}
+
 fn apply_engine_opts(engine: &mut Engine, opts: &DisasmEngineOpts) -> Result<()> {
     if let Some(v) = opts.syntax {
         engine
@@ -397,8 +449,12 @@ fn disasm_bounded(
     if out.is_empty() {
         return Err(Error::Decode(format!("no instructions at {start:#x}")));
     }
-    if out.len() >= max_insns && stop_reason == DisasmStopReason::Count {
-        stop_reason = DisasmStopReason::Count;
+    if stop_reason == DisasmStopReason::Count {
+        stop_reason = if bound_end.is_some_and(|end| va >= end) {
+            DisasmStopReason::FunctionEnd
+        } else {
+            DisasmStopReason::Count
+        };
     }
     Ok(DisasmRangeResult {
         insns: out,
@@ -614,6 +670,69 @@ mod tests {
         assert_eq!(i0.operands, "eax, eax");
         let i1 = decode_one(&b[2..], 2).unwrap();
         assert_eq!(i1.mnemonic, "ret");
+    }
+
+    #[test]
+    fn reusable_session_matches_independent_range_decoders() {
+        let base = 0x1400_01000;
+        let bytes = vec![0x31, 0xc0, 0xc3, 0xcc, 0x55, 0x48, 0x89, 0xe5, 0xc3];
+        let mut prog = Program::new("session".into(), "PE32+");
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: base,
+            size: bytes.len() as u64,
+            bytes,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog.analysis
+            .functions
+            .push(crate::program::FunctionInfo::new(base, base + 3, "tiny"));
+        let mut session = DisasmSession::new(&prog).unwrap();
+        for (entry, max) in [(base, 3), (base + 4, 4), (base, 3)] {
+            let reusable = session.disassemble_range(&prog, entry, max).unwrap();
+            let independent = disassemble_range(&prog, entry, max).unwrap();
+            let shape = |list: &[Instruction]| {
+                list.iter()
+                    .map(|i| (i.address, i.length, i.mnemonic.clone(), i.operands.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(shape(&reusable), shape(&independent));
+        }
+        let truncated = session.disassemble_range_result(&prog, base, 1).unwrap();
+        assert_eq!(truncated.stop_reason, DisasmStopReason::Count);
+
+        // The metadata says this function ends at `base + 3`, but the result API
+        // must preserve the same linear decoding semantics as the ordinary API.
+        let result = session.disassemble_range_result(&prog, base, 8).unwrap();
+        let linear = session.disassemble_range(&prog, base, 8).unwrap();
+        assert_eq!(result.insns.len(), linear.len());
+        assert_eq!(result.stop_reason, DisasmStopReason::DecodeFail);
+    }
+
+    #[test]
+    fn result_honors_authoritative_pdata_end() {
+        let base = 0x1400_02000;
+        let bytes = vec![0x31, 0xc0, 0xc3, 0x90, 0xc3];
+        let mut prog = Program::new("pdata-bound".into(), "PE32+");
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: base,
+            size: bytes.len() as u64,
+            bytes,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog.analysis.functions.push(
+            crate::program::FunctionInfo::new(base, base + 3, "pdata")
+                .with_seed_kind(crate::program::FunctionSeedKind::Pdata),
+        );
+        let mut session = DisasmSession::new(&prog).unwrap();
+        let result = session.disassemble_range_result(&prog, base, 8).unwrap();
+        assert_eq!(result.insns.len(), 2);
+        assert_eq!(result.stop_reason, DisasmStopReason::FunctionEnd);
     }
 
     #[test]

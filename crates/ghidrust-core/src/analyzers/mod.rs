@@ -88,6 +88,8 @@ pub struct AnalyzerOutput {
     pub name: String,
     pub status: String,
     pub message: String,
+    #[serde(default)]
+    pub duration_us: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtti: Option<RttiReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,7 +210,10 @@ pub fn run_analyzers_opts(
             set_preferred_bulk_mode(BulkScanMode::ParallelCpu);
         }
 
-        report.results.push(run_one(prog, name)?);
+        let analyzer_started = std::time::Instant::now();
+        let mut output = run_one(prog, name)?;
+        output.duration_us = analyzer_started.elapsed().as_micros();
+        report.results.push(output);
 
         if gpu_this {
             let enriched = gpu_enrich_analyzers(prog, &[name]);
