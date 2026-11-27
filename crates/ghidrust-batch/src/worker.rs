@@ -41,6 +41,10 @@ pub struct WorkerResponse {
     pub partial_reason: Option<String>,
     #[serde(default)]
     pub structure_fallback: bool,
+    #[serde(default)]
+    pub region_count: usize,
+    #[serde(default)]
+    pub region_construction_cost: usize,
     pub decompile_us: u128,
     pub goto_count: usize,
     pub leaf_count: usize,
@@ -61,6 +65,8 @@ impl WorkerResponse {
             error: self.error,
             partial_reason: self.partial_reason,
             structure_fallback: self.structure_fallback,
+            region_count: self.region_count,
+            region_construction_cost: self.region_construction_cost,
             insn_count,
             decompile_us: self.decompile_us,
             goto_count: self.goto_count,
@@ -159,6 +165,8 @@ fn run_stdio_worker_inner() -> Result<(), String> {
                         )
                     }),
                     structure_fallback: stage1.structure.unstructured_fallback,
+                    region_count: stage1.structure.region.block_count(),
+                    region_construction_cost: stage1.structure.construction_cost,
                     decompile_us: start.elapsed().as_micros(),
                     goto_count: ghidrust_structure::goto_count(&stage1.structure.region),
                     leaf_count: ghidrust_structure::region_leaf_count(&stage1.structure.region),
@@ -172,6 +180,8 @@ fn run_stdio_worker_inner() -> Result<(), String> {
                 error: Some("worker panic caught".into()),
                 partial_reason: None,
                 structure_fallback: false,
+                region_count: 0,
+                region_construction_cost: 0,
                 decompile_us: start.elapsed().as_micros(),
                 goto_count: 0,
                 leaf_count: 0,
@@ -218,6 +228,8 @@ mod tests {
             error: Some("synthetic failure".into()),
             partial_reason: None,
             structure_fallback: false,
+            region_count: 0,
+            region_construction_cost: 0,
             decompile_us: 3,
             goto_count: 0,
             leaf_count: 0,

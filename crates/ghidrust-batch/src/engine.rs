@@ -80,6 +80,12 @@ pub struct FunctionOutcome {
     /// True when the complete CFG was emitted through the structurer fallback.
     #[serde(default)]
     pub structure_fallback: bool,
+    /// Number of Region nodes/leaf entries after structuring.
+    #[serde(default)]
+    pub region_count: usize,
+    /// Construction steps charged against the per-function structuring budget.
+    #[serde(default)]
+    pub region_construction_cost: usize,
     pub insn_count: usize,
     pub decompile_us: u128,
     pub goto_count: usize,
@@ -1043,6 +1049,8 @@ fn worker_loop(
                                 error: Some(format!("decoder init: {error}")),
                                 partial_reason: None,
                                 structure_fallback: false,
+                                region_count: 0,
+                                region_construction_cost: 0,
                                 insn_count: 0,
                                 decompile_us: start.elapsed().as_micros(),
                                 goto_count: 0,
@@ -1136,6 +1144,8 @@ fn worker_loop(
                     error: Some(error),
                     partial_reason: None,
                     structure_fallback: false,
+                    region_count: 0,
+                    region_construction_cost: 0,
                     insn_count: 0,
                     decompile_us: start.elapsed().as_micros(),
                     goto_count: 0,

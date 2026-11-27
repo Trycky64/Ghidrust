@@ -36,6 +36,10 @@ pub struct JsonlRecord {
     pub partial_reason: Option<String>,
     #[serde(default)]
     pub structure_fallback: bool,
+    #[serde(default)]
+    pub region_count: usize,
+    #[serde(default)]
+    pub region_construction_cost: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pseudo_c: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,6 +121,8 @@ impl OutputWriter {
                     .to_string(),
                     partial_reason: outcome.partial_reason.clone(),
                     structure_fallback: outcome.structure_fallback,
+                    region_count: outcome.region_count,
+                    region_construction_cost: outcome.region_construction_cost,
                     pseudo_c: outcome.pseudo_c.clone(),
                     error: outcome.error.clone(),
                     insn_count: outcome.insn_count,
@@ -339,6 +345,8 @@ mod recovery_tests {
                 error: None,
                 partial_reason: None,
                 structure_fallback: false,
+                region_count: 1,
+                region_construction_cost: 1,
                 insn_count: 2,
                 decompile_us: 3,
                 goto_count: 0,
