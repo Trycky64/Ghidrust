@@ -77,18 +77,29 @@ impl DisasmSession {
 
     /// Keep the stop reason so callers can report instruction-limit truncation.
     ///
-    /// This intentionally mirrors [`Self::disassemble_range`]: inferred function
-    /// end addresses are useful metadata, but may be too short for a function
-    /// whose control flow or seed analysis is incomplete. Applying such an end
-    /// here silently dropped instructions compared with the ordinary linear
-    /// decoder, and incorrectly marked the result complete. Callers that need a
-    /// hard address bound should use the bounded disassembly API explicitly.
+    /// Inferred function ends may be too short for a function whose control
+    /// flow or seed analysis is incomplete, so those retain the same linear
+    /// behavior as [`Self::disassemble_range`]. Exact PE `.pdata` ends are
+    /// authoritative and safely bound the result to a known runtime function.
     pub fn disassemble_range_result(
         &mut self,
         prog: &Program,
         start: u64,
         max_insns: usize,
     ) -> Result<DisasmRangeResult> {
+        if let Some(function) = prog.function_containing(start).filter(|f| {
+            f.seed_kind == Some(crate::program::FunctionSeedKind::Pdata) && f.end > f.entry
+        }) {
+            return disasm_bounded(
+                prog,
+                &mut self.engine,
+                start,
+                max_insns,
+                false,
+                Some(function.end),
+                Some(function.entry),
+            );
+        }
         disasm_linear(prog, &mut self.engine, start, max_insns, false)
     }
 }
@@ -674,6 +685,30 @@ mod tests {
         let linear = session.disassemble_range(&prog, base, 8).unwrap();
         assert_eq!(result.insns.len(), linear.len());
         assert_eq!(result.stop_reason, DisasmStopReason::DecodeFail);
+    }
+
+    #[test]
+    fn result_honors_authoritative_pdata_end() {
+        let base = 0x1400_02000;
+        let bytes = vec![0x31, 0xc0, 0xc3, 0x90, 0xc3];
+        let mut prog = Program::new("pdata-bound".into(), "PE32+");
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: base,
+            size: bytes.len() as u64,
+            bytes,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog.analysis.functions.push(
+            crate::program::FunctionInfo::new(base, base + 3, "pdata")
+                .with_seed_kind(crate::program::FunctionSeedKind::Pdata),
+        );
+        let mut session = DisasmSession::new(&prog).unwrap();
+        let result = session.disassemble_range_result(&prog, base, 8).unwrap();
+        assert_eq!(result.insns.len(), 2);
+        assert_eq!(result.stop_reason, DisasmStopReason::FunctionEnd);
     }
 
     #[test]

@@ -426,7 +426,7 @@ mod tests {
         data[coff + 16..coff + 18].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size
         let opt = coff + 20; // 0x98
         data[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+
-                                                                     // AddressOfEntryPoint RVA
+        // AddressOfEntryPoint RVA
         data[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
         // ImageBase
         data[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes());
@@ -439,7 +439,7 @@ mod tests {
         data[exc + 4..exc + 8].copy_from_slice(&12u32.to_le_bytes());
 
         let sec = opt + 0xF0; // section table
-                              // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
+        // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
         write_sec(
             &mut data,
             sec,
@@ -514,13 +514,33 @@ mod tests {
     }
 
     #[test]
+    fn function_start_preserves_pdata_span_past_early_ret() {
+        let mut bytes = minimal_pe_with_pdata();
+        // First ret is early, but the RUNTIME_FUNCTION span continues through
+        // padding and a second return at its exact exclusive end.
+        bytes[0x400..0x408].copy_from_slice(&[0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3]);
+        let mut prog = crate::pe::load_pe(&bytes, "pdata_early_ret").expect("load PE");
+        let report = crate::analyzers::run_analyzers(&mut prog, &["Function Start Search"])
+            .expect("run function start search");
+        let function = report.results[0]
+            .functions
+            .as_ref()
+            .expect("function list")
+            .iter()
+            .find(|function| function.entry == 0x140001000)
+            .expect("pdata seed");
+        assert_eq!(function.end, 0x140001008);
+        assert_eq!(function.seed_kind, Some(FunctionSeedKind::Pdata));
+    }
+
+    #[test]
     fn chaininfo_embedded_node_not_seeded() {
         // Build UNWIND_INFO with CHAININFO + embedded RUNTIME_FUNCTION begin=0.
         let mut bytes = minimal_pe_with_pdata();
         // flags: version=1 (low 3) + CHAININFO (bit of flags << 3) → 0x01 | (0x4 << 3) = 0x21
         bytes[0x60C] = 0x21;
         bytes[0x60E] = 0x00; // no codes
-                             // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
+        // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
         bytes[0x610..0x614].copy_from_slice(&0u32.to_le_bytes());
         bytes[0x614..0x618].copy_from_slice(&0x1008u32.to_le_bytes());
         bytes[0x618..0x61C].copy_from_slice(&0x200Cu32.to_le_bytes());
