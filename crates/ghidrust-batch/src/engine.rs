@@ -7,7 +7,7 @@ use crate::memory;
 use crate::output::{completed_jsonl_addresses, OutputFormat, OutputWriter};
 use crate::worker::{WorkerRequest, WorkerResponse, WorkerTelemetry};
 use crossbeam_channel::{bounded, Receiver};
-use ghidrust_core::disasm::{DisasmSession, DisasmStopReason};
+use ghidrust_core::disasm::{DisasmRangeResult, DisasmSession, DisasmStopReason};
 use ghidrust_core::{load_path, run_analyzers, FunctionInfo, Instruction, Program};
 use ghidrust_decomp::{structure_hints_from, EmitHints};
 use ghidrust_structure::StructureHints;
@@ -1068,8 +1068,7 @@ fn worker_loop(
                     .unwrap()
                     .disassemble_range_result(&program, function.entry, max_insns)
                     .map(|result| {
-                        let partial_reason = (result.stop_reason == DisasmStopReason::Count)
-                            .then(|| format!("instruction limit reached ({max_insns})"));
+                        let partial_reason = disassembly_partial_reason(&result, max_insns);
                         (result.insns, partial_reason)
                     })
                     .map_err(|e| format!("disassembly: {e}"))
@@ -1159,6 +1158,21 @@ fn worker_loop(
     }
 }
 
+fn disassembly_partial_reason(result: &DisasmRangeResult, max_insns: usize) -> Option<String> {
+    match result.stop_reason {
+        DisasmStopReason::Count => Some(format!("instruction limit reached ({max_insns})")),
+        DisasmStopReason::DecodeFail => Some(format!(
+            "decoding stopped at {:#x}: {}",
+            result.decode_error_va.unwrap_or_default(),
+            result
+                .decode_error
+                .as_deref()
+                .unwrap_or("decoder reported failure without a diagnostic")
+        )),
+        DisasmStopReason::FunctionEnd | DisasmStopReason::Int3 | DisasmStopReason::NextSeed => None,
+    }
+}
+
 fn validate_budget(gib: f64) -> Result<(), String> {
     if !gib.is_finite() || !(0.5..=4.0).contains(&gib) {
         return Err("memory budget must be between 0.5 and 4 GiB".into());
@@ -1201,11 +1215,37 @@ fn fingerprint_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghidrust_core::program::MemoryBlock;
 
     #[test]
     fn requested_worker_count_is_capped_by_budget() {
         assert_eq!(validate_budget(4.0), Ok(()));
         assert!(validate_budget(24.0).is_err());
         assert!(validate_budget(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn partial_decode_reports_prefix_and_exact_failure_location() {
+        let base = 0x1400_01000;
+        let mut program = Program::new("partial-decode".into(), "PE32+");
+        program.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: base,
+            size: 2,
+            bytes: vec![0x90, 0x06], // valid NOP, then invalid in 64-bit mode
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+
+        let mut decoder = DisasmSession::new(&program).unwrap();
+        let result = decoder.disassemble_range_result(&program, base, 8).unwrap();
+
+        assert_eq!(result.insns.len(), 1, "the valid prefix is retained");
+        assert_eq!(result.stop_reason, DisasmStopReason::DecodeFail);
+        assert_eq!(result.decode_error_va, Some(base + 1));
+        let reason = disassembly_partial_reason(&result, 8).unwrap();
+        assert!(reason.contains("0x140001001"), "{reason}");
+        assert!(reason.contains("decode"), "{reason}");
     }
 }
